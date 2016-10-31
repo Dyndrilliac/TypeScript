@@ -29,7 +29,7 @@ namespace ts {
         }
     }
 
-    function reportEmittedFiles(files: string[], host: CompilerHost): void {
+    function reportEmittedFiles(files: string[]): void {
         if (!files || files.length == 0) {
             return;
         }
@@ -111,7 +111,7 @@ namespace ts {
         return count;
     }
 
-    function getDiagnosticText(message: DiagnosticMessage, ...args: any[]): string {
+    function getDiagnosticText(_message: DiagnosticMessage, ..._args: any[]): string {
         const diagnostic = createCompilerDiagnostic.apply(undefined, arguments);
         return <string>diagnostic.messageText;
     }
@@ -250,8 +250,8 @@ namespace ts {
         let compilerOptions: CompilerOptions;                       // Compiler options for compilation
         let compilerHost: CompilerHost;                             // Compiler host
         let hostGetSourceFile: typeof compilerHost.getSourceFile;   // getSourceFile method from default host
-        let timerHandleForRecompilation: number;                    // Handle for 0.25s wait timer to trigger recompilation
-        let timerHandleForDirectoryChanges: number;                 // Handle for 0.25s wait timer to trigger directory change handler
+        let timerHandleForRecompilation: any;                    // Handle for 0.25s wait timer to trigger recompilation
+        let timerHandleForDirectoryChanges: any;                 // Handle for 0.25s wait timer to trigger directory change handler
 
         // This map stores and reuses results of fileExists check that happen inside 'createProgram'
         // This allows to save time in module resolution heavy scenarios when existence of the same file might be checked multiple times.
@@ -456,7 +456,7 @@ namespace ts {
             const sourceFile = hostGetSourceFile(fileName, languageVersion, onError);
             if (sourceFile && isWatchSet(compilerOptions) && sys.watchFile) {
                 // Attach a file watcher
-                sourceFile.fileWatcher = sys.watchFile(sourceFile.fileName, (fileName: string, removed?: boolean) => sourceFileChanged(sourceFile, removed));
+                sourceFile.fileWatcher = sys.watchFile(sourceFile.fileName, (_fileName: string, removed?: boolean) => sourceFileChanged(sourceFile, removed));
             }
             return sourceFile;
         }
@@ -503,10 +503,14 @@ namespace ts {
         }
 
         function startTimerForHandlingDirectoryChanges() {
-            if (timerHandleForDirectoryChanges) {
-                clearTimeout(timerHandleForDirectoryChanges);
+            if (!sys.setTimeout || !sys.clearTimeout) {
+                return;
             }
-            timerHandleForDirectoryChanges = setTimeout(directoryChangeHandler, 250);
+
+            if (timerHandleForDirectoryChanges) {
+                sys.clearTimeout(timerHandleForDirectoryChanges);
+            }
+            timerHandleForDirectoryChanges = sys.setTimeout(directoryChangeHandler, 250);
         }
 
         function directoryChangeHandler() {
@@ -525,10 +529,14 @@ namespace ts {
         // operations (such as saving all modified files in an editor) a chance to complete before we kick
         // off a new compilation.
         function startTimerForRecompilation() {
-            if (timerHandleForRecompilation) {
-                clearTimeout(timerHandleForRecompilation);
+            if (!sys.setTimeout || !sys.clearTimeout) {
+                return;
             }
-            timerHandleForRecompilation = setTimeout(recompile, 250);
+
+            if (timerHandleForRecompilation) {
+                sys.clearTimeout(timerHandleForRecompilation);
+            }
+            timerHandleForRecompilation = sys.setTimeout(recompile, 250);
         }
 
         function recompile() {
@@ -617,7 +625,7 @@ namespace ts {
 
             reportDiagnostics(sortAndDeduplicateDiagnostics(diagnostics), compilerHost);
 
-            reportEmittedFiles(emitOutput.emittedFiles, compilerHost);
+            reportEmittedFiles(emitOutput.emittedFiles);
 
             if (emitOutput.emitSkipped && diagnostics.length > 0) {
                 // If the emitter didn't emit anything, then pass that value along.
@@ -667,7 +675,7 @@ namespace ts {
     }
 
     function printHelp() {
-        let output = "";
+        const output: string[] = [];
 
         // We want to align our "syntax" and "examples" commands to a certain margin.
         const syntaxLength = getDiagnosticText(Diagnostics.Syntax_Colon_0, "").length;
@@ -678,17 +686,17 @@ namespace ts {
         let syntax = makePadding(marginLength - syntaxLength);
         syntax += "tsc [" + getDiagnosticText(Diagnostics.options) + "] [" + getDiagnosticText(Diagnostics.file) + " ...]";
 
-        output += getDiagnosticText(Diagnostics.Syntax_Colon_0, syntax);
-        output += sys.newLine + sys.newLine;
+        output.push(getDiagnosticText(Diagnostics.Syntax_Colon_0, syntax));
+        output.push(sys.newLine + sys.newLine);
 
         // Build up the list of examples.
         const padding = makePadding(marginLength);
-        output += getDiagnosticText(Diagnostics.Examples_Colon_0, makePadding(marginLength - examplesLength) + "tsc hello.ts") + sys.newLine;
-        output += padding + "tsc --outFile file.js file.ts" + sys.newLine;
-        output += padding + "tsc @args.txt" + sys.newLine;
-        output += sys.newLine;
+        output.push(getDiagnosticText(Diagnostics.Examples_Colon_0, makePadding(marginLength - examplesLength) + "tsc hello.ts") + sys.newLine);
+        output.push(padding + "tsc --outFile file.js file.ts" + sys.newLine);
+        output.push(padding + "tsc @args.txt" + sys.newLine);
+        output.push(sys.newLine);
 
-        output += getDiagnosticText(Diagnostics.Options_Colon) + sys.newLine;
+        output.push(getDiagnosticText(Diagnostics.Options_Colon) + sys.newLine);
 
         // Sort our options by their names, (e.g. "--noImplicitAny" comes before "--watch")
         const optsList = filter(optionDeclarations.slice(), v => !v.experimental);
@@ -755,18 +763,20 @@ namespace ts {
             const usage = usageColumn[i];
             const description = descriptionColumn[i];
             const kindsList = optionsDescriptionMap[description];
-            output += usage + makePadding(marginLength - usage.length + 2) + description + sys.newLine;
+            output.push(usage + makePadding(marginLength - usage.length + 2) + description + sys.newLine);
 
             if (kindsList) {
-                output += makePadding(marginLength + 4);
+                output.push(makePadding(marginLength + 4));
                 for (const kind of kindsList) {
-                    output += kind + " ";
+                    output.push(kind + " ");
                 }
-                output += sys.newLine;
+                output.push(sys.newLine);
             }
         }
 
-        sys.write(output);
+        for (const line of output) {
+            sys.write(line);
+        }
         return;
 
         function getParamType(option: CommandLineOption) {

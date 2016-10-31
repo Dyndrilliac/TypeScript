@@ -231,9 +231,6 @@ namespace ts {
             endLexicalEnvironment,
             hoistFunctionDeclaration,
             hoistVariableDeclaration,
-            setSourceMapRange,
-            setCommentRange,
-            setNodeEmitFlags
         } = context;
 
         const compilerOptions = context.getCompilerOptions();
@@ -294,6 +291,10 @@ namespace ts {
         return transformSourceFile;
 
         function transformSourceFile(node: SourceFile) {
+            if (isDeclarationFile(node)) {
+                return node;
+            }
+
             if (node.transformFlags & TransformFlags.ContainsGenerator) {
                 currentSourceFile = node;
                 node = visitEachChild(node, visitor, context);
@@ -444,7 +445,7 @@ namespace ts {
          */
         function visitFunctionDeclaration(node: FunctionDeclaration): Statement {
             // Currently, we only support generators that were originally async functions.
-            if (node.asteriskToken && node.emitFlags & NodeEmitFlags.AsyncFunctionBody) {
+            if (node.asteriskToken && getEmitFlags(node) & EmitFlags.AsyncFunctionBody) {
                 node = setOriginalNode(
                     createFunctionDeclaration(
                         /*decorators*/ undefined,
@@ -492,9 +493,10 @@ namespace ts {
          */
         function visitFunctionExpression(node: FunctionExpression): Expression {
             // Currently, we only support generators that were originally async functions.
-            if (node.asteriskToken && node.emitFlags & NodeEmitFlags.AsyncFunctionBody) {
+            if (node.asteriskToken && getEmitFlags(node) & EmitFlags.AsyncFunctionBody) {
                 node = setOriginalNode(
                     createFunctionExpression(
+                        /*modifiers*/ undefined,
                         /*asteriskToken*/ undefined,
                         node.name,
                         /*typeParameters*/ undefined,
@@ -527,7 +529,7 @@ namespace ts {
          *
          * @param node The node to visit.
          */
-        function visitAccessorDeclaration(node: GetAccessorDeclaration) {
+        function visitAccessorDeclaration(node: AccessorDeclaration) {
             const savedInGeneratorFunctionBody = inGeneratorFunctionBody;
             const savedInStatementContainingYield = inStatementContainingYield;
             inGeneratorFunctionBody = false;
@@ -551,6 +553,7 @@ namespace ts {
             const savedBlocks = blocks;
             const savedBlockOffsets = blockOffsets;
             const savedBlockActions = blockActions;
+            const savedBlockStack = blockStack;
             const savedLabelOffsets = labelOffsets;
             const savedLabelExpressions = labelExpressions;
             const savedNextLabelId = nextLabelId;
@@ -565,6 +568,7 @@ namespace ts {
             blocks = undefined;
             blockOffsets = undefined;
             blockActions = undefined;
+            blockStack = undefined;
             labelOffsets = undefined;
             labelExpressions = undefined;
             nextLabelId = 1;
@@ -573,10 +577,10 @@ namespace ts {
             operationLocations = undefined;
             state = createTempVariable(/*recordTempVariable*/ undefined);
 
-            const statementOffset = addPrologueDirectives(statements, body.statements, /*ensureUseStrict*/ false, visitor);
-
             // Build the generator
             startLexicalEnvironment();
+
+            const statementOffset = addPrologueDirectives(statements, body.statements, /*ensureUseStrict*/ false, visitor);
 
             transformAndEmitStatements(body.statements, statementOffset);
 
@@ -590,6 +594,7 @@ namespace ts {
             blocks = savedBlocks;
             blockOffsets = savedBlockOffsets;
             blockActions = savedBlockActions;
+            blockStack = savedBlockStack;
             labelOffsets = savedLabelOffsets;
             labelExpressions = savedLabelExpressions;
             nextLabelId = savedNextLabelId;
@@ -615,6 +620,11 @@ namespace ts {
                 return undefined;
             }
             else {
+                // Do not hoist custom prologues.
+                if (getEmitFlags(node) & EmitFlags.CustomPrologue) {
+                    return node;
+                }
+
                 for (const variable of node.declarationList.declarations) {
                     hoistVariableDeclaration(<Identifier>variable.name);
                 }
@@ -651,12 +661,12 @@ namespace ts {
             }
         }
 
-        function isCompoundAssignment(kind: SyntaxKind) {
+        function isCompoundAssignment(kind: BinaryOperator): kind is CompoundAssignmentOperator {
             return kind >= SyntaxKind.FirstCompoundAssignment
                 && kind <= SyntaxKind.LastCompoundAssignment;
         }
 
-        function getOperatorForCompoundAssignment(kind: SyntaxKind) {
+        function getOperatorForCompoundAssignment(kind: CompoundAssignmentOperator): BitwiseOperatorOrHigher {
             switch (kind) {
                 case SyntaxKind.PlusEqualsToken: return SyntaxKind.PlusToken;
                 case SyntaxKind.MinusEqualsToken: return SyntaxKind.MinusToken;
@@ -946,7 +956,7 @@ namespace ts {
          * @param elements The elements to visit.
          * @param multiLine Whether array literals created should be emitted on multiple lines.
          */
-        function visitElements(elements: NodeArray<Expression>, multiLine: boolean) {
+        function visitElements(elements: NodeArray<Expression>, _multiLine?: boolean) {
             // [source]
             //      ar = [1, yield, 2];
             //
@@ -1020,7 +1030,7 @@ namespace ts {
             const temp = declareLocal();
             emitAssignment(temp,
                 createObjectLiteral(
-                    visitNodes(properties, visitor, isObjectLiteralElement, 0, numInitialProperties),
+                    visitNodes(properties, visitor, isObjectLiteralElementLike, 0, numInitialProperties),
                     /*location*/ undefined,
                     multiLine
                 )
@@ -1030,13 +1040,13 @@ namespace ts {
             expressions.push(multiLine ? startOnNewLine(getMutableClone(temp)) : temp);
             return inlineExpressions(expressions);
 
-            function reduceProperty(expressions: Expression[], property: ObjectLiteralElement) {
+            function reduceProperty(expressions: Expression[], property: ObjectLiteralElementLike) {
                 if (containsYield(property) && expressions.length > 0) {
                     emitStatement(createStatement(inlineExpressions(expressions)));
                     expressions = [];
                 }
 
-                const expression = createExpressionForObjectLiteralElement(node, property, temp);
+                const expression = createExpressionForObjectLiteralElementLike(node, property, temp);
                 const visited = visitNode(expression, visitor, isExpression);
                 if (visited) {
                     if (multiLine) {
@@ -1092,7 +1102,7 @@ namespace ts {
                     createFunctionApply(
                         cacheExpression(visitNode(target, visitor, isLeftHandSideExpression)),
                         thisArg,
-                        visitElements(node.arguments, /*multiLine*/ false),
+                        visitElements(node.arguments),
                         /*location*/ node
                     ),
                     node
@@ -1121,7 +1131,7 @@ namespace ts {
                         createFunctionApply(
                             cacheExpression(visitNode(target, visitor, isExpression)),
                             thisArg,
-                            visitElements(node.arguments, /*multiLine*/ false)
+                            visitElements(node.arguments)
                         ),
                         /*typeArguments*/ undefined,
                         [],
@@ -1882,9 +1892,9 @@ namespace ts {
             return -1;
         }
 
-        function onSubstituteNode(node: Node, isExpression: boolean): Node {
-            node = previousOnSubstituteNode(node, isExpression);
-            if (isExpression) {
+        function onSubstituteNode(emitContext: EmitContext, node: Node): Node {
+            node = previousOnSubstituteNode(emitContext, node);
+            if (emitContext === EmitContext.Expression) {
                 return substituteExpression(<Expression>node);
             }
             return node;
@@ -2359,7 +2369,7 @@ namespace ts {
                     labelExpressions = [];
                 }
 
-                const expression = <LiteralExpression>createSynthesizedNode(SyntaxKind.NumericLiteral);
+                const expression = createLiteral(-1);
                 if (labelExpressions[label] === undefined) {
                     labelExpressions[label] = [expression];
                 }
@@ -2370,7 +2380,7 @@ namespace ts {
                 return expression;
             }
 
-            return <OmittedExpression>createNode(SyntaxKind.OmittedExpression);
+            return createOmittedExpression();
         }
 
         /**
@@ -2580,12 +2590,13 @@ namespace ts {
                 /*typeArguments*/ undefined,
                 [
                     createThis(),
-                    setNodeEmitFlags(
+                    setEmitFlags(
                         createFunctionExpression(
+                            /*modifiers*/ undefined,
                             /*asteriskToken*/ undefined,
                             /*name*/ undefined,
                             /*typeParameters*/ undefined,
-                            [createParameter(state)],
+                            [createParameter(/*decorators*/ undefined, /*modifiers*/ undefined, /*dotDotDotToken*/ undefined, state)],
                             /*type*/ undefined,
                             createBlock(
                                 buildResult,
@@ -2593,7 +2604,7 @@ namespace ts {
                                 /*multiLine*/ buildResult.length > 0
                             )
                         ),
-                        NodeEmitFlags.ReuseTempVariableScope
+                        EmitFlags.ReuseTempVariableScope
                     )
                 ]
             );

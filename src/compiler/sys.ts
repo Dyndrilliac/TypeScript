@@ -34,6 +34,8 @@ namespace ts {
         realpath?(path: string): string;
         /*@internal*/ getEnvironmentVariable(name: string): string;
         /*@internal*/ tryEnableSourceMapsForHost?(): void;
+        setTimeout?(callback: (...args: any[]) => void, ms: number, ...args: any[]): any;
+        clearTimeout?(timeoutId: any): void;
     }
 
     export interface FileWatcher {
@@ -46,13 +48,9 @@ namespace ts {
     }
 
     declare var require: any;
-    declare var module: any;
     declare var process: any;
     declare var global: any;
     declare var __filename: string;
-    declare var Buffer: {
-        new (str: string, encoding?: string): any;
-    };
 
     declare class Enumerator {
         public atEnd(): boolean;
@@ -83,7 +81,7 @@ namespace ts {
         getEnvironmentVariable?(name: string): string;
     };
 
-    export var sys: System = (function() {
+    export let sys: System = (function() {
 
         function getWScriptSystem(): System {
 
@@ -311,11 +309,20 @@ namespace ts {
                 return parseInt(process.version.charAt(1)) >= 4;
             }
 
-            const platform: string = _os.platform();
-            // win32\win64 are case insensitive platforms, MacOS (darwin) by default is also case insensitive
-            const useCaseSensitiveFileNames = platform !== "win32" && platform !== "win64" && platform !== "darwin";
+            function isFileSystemCaseSensitive(): boolean {
+                // win32\win64 are case insensitive platforms
+                if (platform === "win32" || platform === "win64") {
+                    return false;
+                }
+                // convert current file name to upper case / lower case and check if file exists
+                // (guards against cases when name is already all uppercase or lowercase)
+                return !fileExists(__filename.toUpperCase()) || !fileExists(__filename.toLowerCase());
+            }
 
-            function readFile(fileName: string, encoding?: string): string {
+            const platform: string = _os.platform();
+            const useCaseSensitiveFileNames = isFileSystemCaseSensitive();
+
+            function readFile(fileName: string, _encoding?: string): string {
                 if (!fileExists(fileName)) {
                     return undefined;
                 }
@@ -467,6 +474,10 @@ namespace ts {
                     // Node 4.0 `fs.watch` function supports the "recursive" option on both OSX and Windows
                     // (ref: https://github.com/nodejs/node/pull/2649 and https://github.com/Microsoft/TypeScript/issues/4643)
                     let options: any;
+                    if (!directoryExists(directoryName)) {
+                        return;
+                    }
+
                     if (isNode4OrLater() && (process.platform === "win32" || process.platform === "darwin")) {
                         options = { persistent: true, recursive: !!recursive };
                     }
@@ -551,7 +562,9 @@ namespace ts {
                     catch (e) {
                         // Could not enable source maps.
                     }
-                }
+                },
+                setTimeout,
+                clearTimeout
             };
             return nodeSystem;
         }
@@ -563,7 +576,7 @@ namespace ts {
                 args: ChakraHost.args,
                 useCaseSensitiveFileNames: !!ChakraHost.useCaseSensitiveFileNames,
                 write: ChakraHost.echo,
-                readFile(path: string, encoding?: string) {
+                readFile(path: string, _encoding?: string) {
                     // encoding is automatically handled by the implementation in ChakraHost
                     return ChakraHost.readFile(path);
                 },
@@ -582,9 +595,9 @@ namespace ts {
                 getExecutingFilePath: () => ChakraHost.executingFile,
                 getCurrentDirectory: () => ChakraHost.currentDirectory,
                 getDirectories: ChakraHost.getDirectories,
-                getEnvironmentVariable: ChakraHost.getEnvironmentVariable || ((name: string) => ""),
+                getEnvironmentVariable: ChakraHost.getEnvironmentVariable || (() => ""),
                 readDirectory: (path: string, extensions?: string[], excludes?: string[], includes?: string[]) => {
-                    const pattern = getFileMatcherPatterns(path, extensions, excludes, includes, !!ChakraHost.useCaseSensitiveFileNames, ChakraHost.currentDirectory);
+                    const pattern = getFileMatcherPatterns(path, excludes, includes, !!ChakraHost.useCaseSensitiveFileNames, ChakraHost.currentDirectory);
                     return ChakraHost.readDirectory(path, extensions, pattern.basePaths, pattern.excludePattern, pattern.includeFilePattern, pattern.includeDirectoryPattern);
                 },
                 exit: ChakraHost.quit,
@@ -592,19 +605,46 @@ namespace ts {
             };
         }
 
+        function recursiveCreateDirectory(directoryPath: string, sys: System) {
+            const basePath = getDirectoryPath(directoryPath);
+            const shouldCreateParent = directoryPath !== basePath && !sys.directoryExists(basePath);
+            if (shouldCreateParent) {
+                recursiveCreateDirectory(basePath, sys);
+            }
+            if (shouldCreateParent || !sys.directoryExists(directoryPath)) {
+                sys.createDirectory(directoryPath);
+            }
+        }
+
+        let sys: System;
         if (typeof ChakraHost !== "undefined") {
-            return getChakraSystem();
+            sys = getChakraSystem();
         }
         else if (typeof WScript !== "undefined" && typeof ActiveXObject === "function") {
-            return getWScriptSystem();
+            sys = getWScriptSystem();
         }
         else if (typeof process !== "undefined" && process.nextTick && !process.browser && typeof require !== "undefined") {
             // process and process.nextTick checks if current environment is node-like
             // process.browser check excludes webpack and browserify
-            return getNodeSystem();
+            sys = getNodeSystem();
         }
-        else {
-            return undefined; // Unsupported host
+        if (sys) {
+            // patch writefile to create folder before writing the file
+            const originalWriteFile = sys.writeFile;
+            sys.writeFile = function(path, data, writeBom) {
+                const directoryPath = getDirectoryPath(normalizeSlashes(path));
+                if (directoryPath && !sys.directoryExists(directoryPath)) {
+                    recursiveCreateDirectory(directoryPath, sys);
+                }
+                originalWriteFile.call(sys, path, data, writeBom);
+            };
         }
+        return sys;
     })();
+
+    if (sys && sys.getEnvironmentVariable) {
+        Debug.currentAssertionLevel = /^development$/i.test(sys.getEnvironmentVariable("NODE_ENV"))
+            ? AssertionLevel.Normal
+            : AssertionLevel.None;
+    }
 }
